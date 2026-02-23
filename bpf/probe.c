@@ -7,13 +7,16 @@
 #include <linux/in.h>
 #include <linux/ip.h>
 #include <linux/tcp.h>
-#include <linux/types.h>
 
-#define MAX_PKT_SIZE 1024
+#define MAX_TLS_SIZE 1500
 
 struct event {
-  __u32 pkt_len;
-  __u8 pkt_data[MAX_PKT_SIZE];
+  __u32 src_ip;
+  __u32 dst_ip;
+  __u16 src_port;
+  __u16 dst_port;
+  __u32 tls_len;
+  __u8 tls_data[MAX_TLS_SIZE];
 };
 
 struct {
@@ -26,13 +29,16 @@ int xdp_tls_parser(struct xdp_md *ctx) {
   void *data_end = (void *)(long)ctx->data_end;
   void *data = (void *)(long)ctx->data;
 
+  // Ethernet
   struct ethhdr *eth = data;
   if ((void *)(eth + 1) > data_end)
     return XDP_PASS;
 
+  // Only IPv4 for now. IPv6 (ETH_P_IPV6) support can be added later.
   if (eth->h_proto != bpf_htons(ETH_P_IP))
     return XDP_PASS;
 
+  // IPv4
   __u8 *ip_bytes = (__u8 *)(eth + 1);
   struct iphdr *ip = (struct iphdr *)ip_bytes;
   if ((void *)(ip + 1) > data_end)
@@ -47,6 +53,7 @@ int xdp_tls_parser(struct xdp_md *ctx) {
   if ((void *)(ip_bytes + ip_header_len) > data_end)
     return XDP_PASS;
 
+  // TCP
   __u8 *tcp_bytes = ip_bytes + ip_header_len;
   struct tcphdr *tcp = (struct tcphdr *)tcp_bytes;
   if ((void *)(tcp + 1) > data_end)
@@ -58,38 +65,44 @@ int xdp_tls_parser(struct xdp_md *ctx) {
   if ((void *)(tcp_bytes + tcp_header_len) > data_end)
     return XDP_PASS;
 
+  // TLS Client Hello detection
   __u8 *payload = tcp_bytes + tcp_header_len;
   if ((void *)(payload + 6) > data_end)
     return XDP_PASS;
 
-  // 5. Fingerprint TLS Client Hello
-  // payload[0] == 0x16 (Handshake Record)
-  // payload[1] == 0x03 (TLS 1.x)
-  // payload[5] == 0x01 (Client Hello)
-  if (payload[0] == 0x16 && payload[1] == 0x03 && payload[5] == 0x01) {
+  // payload[0] == 0x16 → TLS Handshake record
+  // payload[1] == 0x03 → TLS 1.x (major version)
+  // payload[5] == 0x01 → Client Hello handshake type
+  if (!(payload[0] == 0x16 && payload[1] == 0x03 && payload[5] == 0x01))
+    return XDP_PASS;
 
-    struct event *e = bpf_ringbuf_reserve(&ringbuf, sizeof(*e), 0);
-    if (!e)
-      return XDP_PASS;
+  // Build event with metadata + raw TLS bytes
+  struct event *e = bpf_ringbuf_reserve(&ringbuf, sizeof(*e), 0);
+  if (!e)
+    return XDP_PASS;
 
-    __u32 len = data_end - data;
-    __u32 copy_len = len;
+  // Connection 4-tuple — useful for logging/correlation in userspace.
+  // IPs kept in network byte order; userspace can convert as needed.
+  e->src_ip = ip->saddr;
+  e->dst_ip = ip->daddr;
+  e->src_port = bpf_ntohs(tcp->source);
+  e->dst_port = bpf_ntohs(tcp->dest);
 
-    if (copy_len > MAX_PKT_SIZE) {
-      copy_len = MAX_PKT_SIZE;
-    }
-    e->pkt_len = copy_len;
+  // Copy only the TLS payload (from TLS record header onward)
+  __u32 tls_len = (__u32)(data_end - (void *)payload);
+  if (tls_len > MAX_TLS_SIZE)
+    tls_len = MAX_TLS_SIZE;
+  e->tls_len = tls_len;
 
-    for (__u32 i = 0; i < MAX_PKT_SIZE; i++) {
-      if (i >= copy_len)
-        break;
-      if ((void *)data + i + 1 > data_end)
-        break;
-      e->pkt_data[i] = *((__u8 *)data + i);
-    }
-
-    bpf_ringbuf_submit(e, 0);
+  for (__u32 i = 0; i < MAX_TLS_SIZE; i++) {
+    if (i >= tls_len)
+      break;
+    if ((void *)(payload + i + 1) > data_end)
+      break;
+    e->tls_data[i] = payload[i];
   }
+
+  bpf_ringbuf_submit(e, 0);
 
   return XDP_PASS;
 }
