@@ -1,3 +1,5 @@
+// go:build ignore
+
 #include <linux/types.h>
 
 #include <bpf/bpf_endian.h>
@@ -106,5 +108,7 @@ int xdp_tls_parser(struct xdp_md *ctx) {
 
   return XDP_PASS;
 }
+
+struct event *unused_event __attribute__((unused));
 
 char _license[] SEC("license") = "GPL";
