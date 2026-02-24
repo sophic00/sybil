@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -e
+
+echo "pre-commit: running go generate for eBPF bindings..."
+go generate ./internal/ebpf/...
+
+# Stage the generated files if they changed
+git add internal/ebpf/bpf_bpfeb.go internal/ebpf/bpf_bpfeb.o \
+        internal/ebpf/bpf_bpfel.go internal/ebpf/bpf_bpfel.o

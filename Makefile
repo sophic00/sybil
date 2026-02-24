@@ -1,4 +1,4 @@
-.PHONY: generate build test
+.PHONY: generate build test setup
 
 generate:
 	go generate ./internal/ebpf/...
@@ -8,3 +8,6 @@ build: generate
 
 test:
 	go test ./...
+
+setup:
+	git config core.hooksPath .githooks
