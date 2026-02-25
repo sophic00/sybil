@@ -13,6 +13,7 @@ import (
 
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/sophic00/sybil/internal/ebpf"
+	"github.com/sophic00/sybil/internal/parser"
 )
 
 func main() {
@@ -61,6 +62,17 @@ func main() {
 		dstIP := intToIP(event.DstIp)
 		log.Printf("TLS Client Hello: %s:%d -> %s:%d (%d bytes)",
 			srcIP, event.SrcPort, dstIP, event.DstPort, event.TlsLen)
+
+		if event.TlsLen > 0 {
+			length := min(event.TlsLen, uint32(len(event.TlsData)))
+
+			parsed, err := parser.ParseTLS(event.TlsData[:length])
+			if err != nil {
+				log.Printf("  failed to parse TLS: %v", err)
+			} else {
+				log.Printf("  Parsed TLS: %+v", parsed)
+			}
+		}
 	}
 }
 
