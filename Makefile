@@ -1,9 +1,6 @@
-.PHONY: generate build test setup run
+.PHONY: build test setup
 
-generate:
-	go generate ./internal/ebpf/...
-
-build: generate
+build:
 	go build -o bin/analyzer ./cmd/analyzer
 
 test:

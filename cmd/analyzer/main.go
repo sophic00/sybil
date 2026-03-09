@@ -2,22 +2,19 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"github.com/cilium/ebpf/ringbuf"
-	"github.com/sophic00/sybil/internal/ebpf"
+	"github.com/sophic00/sybil/internal/capture"
 	"github.com/sophic00/sybil/internal/parser"
 )
 
 func main() {
-	iface := flag.String("iface", "", "network interface to attach XDP probe to")
+	iface := flag.String("iface", "", "network interface to capture on")
 	flag.Parse()
 
 	if *iface == "" {
@@ -25,57 +22,45 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Printf("loading eBPF probe on interface %q...", *iface)
+	log.Printf("starting capture on interface %q...", *iface)
 
-	probe, err := ebpf.Load(*iface)
+	sniffer, err := capture.New(*iface)
 	if err != nil {
-		log.Fatalf("failed to load and attach probe: %v", err)
+		log.Fatalf("failed to start capture: %v", err)
 	}
-	defer func() {
-		log.Println("cleaning up eBPF resources...")
-		if err := probe.Close(); err != nil {
-			log.Printf("error during cleanup: %v", err)
-		}
-		log.Println("shutdown complete")
-	}()
-
-	log.Printf("XDP probe attached, listening for TLS Client Hello packets...")
+	defer sniffer.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	go func() {
-		<-ctx.Done()
-		probe.Close()
-	}()
+	go sniffer.Run()
+
+	log.Println("listening for TLS Client Hello packets...")
 
 	for {
-		event, err := probe.Read()
-		if err != nil {
-			if errors.Is(err, ringbuf.ErrClosed) {
-				break
+		select {
+		case <-ctx.Done():
+			log.Println("shutting down...")
+			sniffer.Close()
+			return
+		case hello, ok := <-sniffer.Hellos():
+			if !ok {
+				return
 			}
-			log.Printf("failed to read event: %v", err)
-			continue
-		}
-		srcIP := intToIP(event.SrcIp)
-		dstIP := intToIP(event.DstIp)
-		log.Printf("TLS Client Hello: %s:%d -> %s:%d (%d bytes)",
-			srcIP, event.SrcPort, dstIP, event.DstPort, event.TlsLen)
+			log.Printf("TLS Client Hello: %s:%d -> %s:%d (%d bytes)",
+				hello.SrcIP, hello.SrcPort, hello.DstIP, hello.DstPort, len(hello.Raw))
 
-		if event.TlsLen > 0 {
-			length := min(event.TlsLen, uint32(len(event.TlsData)))
-
-			parsed, err := parser.ParseTLS(event.TlsData[:length])
+			parsed, err := parser.ParseTLS(hello.Raw)
 			if err != nil {
 				log.Printf("  failed to parse TLS: %v", err)
 			} else {
-				log.Printf("  Parsed TLS: %+v", parsed)
+				log.Printf("  Version: 0x%04x | SNI: %s | ALPN: %s",
+					parsed.TLSVersion, parsed.SNI, parsed.ALPN)
+				log.Printf("  CipherSuites(%d): %04x", len(parsed.CipherSuites), parsed.CipherSuites)
+				log.Printf("  Extensions(%d): %v", len(parsed.Extensions), parsed.Extensions)
+				log.Printf("  SupportedGroups: %04x", parsed.SupportedGroups)
+				log.Printf("  SignatureAlgorithms: %04x", parsed.SignatureAlgorithms)
 			}
 		}
 	}
-}
-
-func intToIP(n uint32) net.IP {
-	return net.IPv4(byte(n), byte(n>>8), byte(n>>16), byte(n>>24))
 }
