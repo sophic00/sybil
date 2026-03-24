@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -21,26 +22,41 @@ import (
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
 	"github.com/google/gopacket/tcpassembly"
+	redis "github.com/redis/go-redis/v9"
 	"github.com/sophic00/sybil/ebpf"
 	"github.com/sophic00/sybil/internal/fingerprint"
 	"github.com/sophic00/sybil/internal/parser"
+	"github.com/sophic00/sybil/internal/risk"
 	"github.com/sophic00/sybil/internal/tlshello"
 )
 
 var (
-	captureBackend = flag.String("backend", "pcap", "Capture backend: pcap or ebpf")
-	ifaceName      = flag.String("iface", "lo", "Interface to attach XDP program to")
-	matchPort      = flag.Uint("port", 0, "Only inspect TCP traffic where either source or destination port matches")
-	helloOutPath   = flag.String("hello-out", "", "Write the first detected TLS hello record bytes to this file")
-	exitAfterHello = flag.Bool("exit-after-hello", false, "Exit after the first matching TLS hello is detected")
+	captureBackend      = flag.String("backend", "pcap", "Capture backend: pcap or ebpf")
+	ifaceName           = flag.String("iface", "lo", "Interface to attach XDP program to")
+	matchPort           = flag.Uint("port", 0, "Only inspect TCP traffic where either source or destination port matches")
+	helloOutPath        = flag.String("hello-out", "", "Write the first detected TLS hello record bytes to this file")
+	exitAfterHello      = flag.Bool("exit-after-hello", false, "Exit after the first matching TLS hello is detected")
+	redisAddr           = flag.String("redis-addr", "", "Redis address for live JA4 risk scoring")
+	redisPassword       = flag.String("redis-password", "", "Redis password for live JA4 risk scoring")
+	redisDB             = flag.Int("redis-db", 0, "Redis database for live JA4 risk scoring")
+	riskKeyPrefix       = flag.String("risk-key-prefix", "sybil:risk", "Redis key prefix for live JA4 risk scoring")
+	ja4LookupURL        = flag.String("ja4-lookup-url", "", "Optional JA4 lookup URL or template. Use %s to inject the URL-escaped JA4 fingerprint")
+	ja4LookupTimeout    = flag.Duration("ja4-lookup-timeout", 2*time.Second, "Timeout for external JA4 enrichment lookups")
+	riskUseHostFallback = flag.Bool("risk-use-host-fallback", true, "Use SNI host as a weaker diversity signal when the real endpoint path is unavailable")
 )
 
 type tlsStreamFactory struct {
-	onHello func(net, transport gopacket.Flow, hello *tlshello.Hello)
+	onHello       func(net, transport gopacket.Flow, hello *tlshello.Hello)
+	onClientHello func(net, transport gopacket.Flow, hello *tlshello.Hello, fields *parser.ClientHelloFields, ja4 *fingerprint.JA4)
 }
 
 func (f *tlsStreamFactory) New(net, transport gopacket.Flow) tcpassembly.Stream {
-	return &tlsStream{net: net, transport: transport, onHello: f.onHello}
+	return &tlsStream{
+		net:           net,
+		transport:     transport,
+		onHello:       f.onHello,
+		onClientHello: f.onClientHello,
+	}
 }
 
 type tlsStream struct {
@@ -48,6 +64,7 @@ type tlsStream struct {
 	extractor      tlshello.Extractor
 	done           bool
 	onHello        func(net, transport gopacket.Flow, hello *tlshello.Hello)
+	onClientHello  func(net, transport gopacket.Flow, hello *tlshello.Hello, fields *parser.ClientHelloFields, ja4 *fingerprint.JA4)
 }
 
 func (s *tlsStream) Reassembled(reassemblies []tcpassembly.Reassembly) {
@@ -100,6 +117,10 @@ func (s *tlsStream) Reassembled(reassemblies []tcpassembly.Reassembly) {
 					fmt.Printf("  ja4_b               : %s\n", ja4.B)
 					fmt.Printf("  ja4_c               : %s\n", ja4.C)
 					fmt.Printf("JA4: %s\n", ja4.Fingerprint)
+
+					if s.onClientHello != nil {
+						s.onClientHello(s.net, s.transport, hello, fields, &ja4)
+					}
 				}
 			}
 		}
@@ -123,6 +144,30 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	var threatScorer *risk.Scorer
+	if *redisAddr != "" {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     *redisAddr,
+			Password: *redisPassword,
+			DB:       *redisDB,
+		})
+		defer rdb.Close()
+
+		if err := rdb.Ping(ctx).Err(); err != nil {
+			log.Fatalf("redis ping failed: %v", err)
+		}
+
+		cfg := risk.DefaultConfig()
+		cfg.UseHostFallback = *riskUseHostFallback
+
+		store := risk.NewRedisStore(rdb, *riskKeyPrefix)
+		var lookup risk.LookupClient
+		if *ja4LookupURL != "" {
+			lookup = risk.NewHTTPLookupClient(*ja4LookupURL, &http.Client{Timeout: *ja4LookupTimeout})
+		}
+		threatScorer = risk.NewScorer(store, lookup, cfg)
+	}
+
 	var helloOnce sync.Once
 	onHello := func(_ gopacket.Flow, _ gopacket.Flow, hello *tlshello.Hello) {
 		helloOnce.Do(func() {
@@ -137,7 +182,39 @@ func main() {
 		})
 	}
 
-	streamFactory := &tlsStreamFactory{onHello: onHello}
+	onClientHello := func(netFlow, _ gopacket.Flow, _ *tlshello.Hello, fields *parser.ClientHelloFields, ja4 *fingerprint.JA4) {
+		if threatScorer == nil || fields == nil || ja4 == nil {
+			return
+		}
+
+		assessment, err := threatScorer.Assess(ctx, risk.Observation{
+			JA4:       ja4.Fingerprint,
+			SourceIP:  netFlow.Src().String(),
+			Hostname:  fields.SNIHost,
+			Timestamp: time.Now(),
+		})
+		if err != nil {
+			log.Printf("risk assessment failed for %s: %v", ja4.Fingerprint, err)
+			return
+		}
+
+		fmt.Printf("Threat Score: %d/100 action=%s", assessment.Score, assessment.Action)
+		if assessment.Delay > 0 {
+			fmt.Printf(" delay=%s", assessment.Delay)
+		}
+		fmt.Println()
+		for _, component := range assessment.Components {
+			fmt.Printf("  %-20s %2d/%-2d %s\n", component.Name+":", component.Score, component.Weight, component.Detail)
+		}
+		if assessment.LookupError != "" {
+			fmt.Printf("  lookup_error         %s\n", assessment.LookupError)
+		}
+	}
+
+	streamFactory := &tlsStreamFactory{
+		onHello:       onHello,
+		onClientHello: onClientHello,
+	}
 	pool := tcpassembly.NewStreamPool(streamFactory)
 	assembler := tcpassembly.NewAssembler(pool)
 

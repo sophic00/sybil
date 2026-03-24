@@ -53,7 +53,30 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 -port <n>               Filter to TCP flows where src or dst port matches
 -hello-out <path>       Save first detected TLS hello record bytes to file
 -exit-after-hello       Exit after first detected TLS hello
+-redis-addr <addr>      Enable Redis-backed live threat scoring
+-redis-password <pwd>   Redis password
+-redis-db <n>           Redis database number (default: 0)
+-risk-key-prefix <key>  Redis prefix for scoring state
+-ja4-lookup-url <url>   Optional JA4 enrichment URL or template
 ```
+
+### Live Threat Scoring
+
+When `-redis-addr` is set, Sybil keeps rolling JA4+IP state in Redis and emits a threat score with progressive actions:
+
+- `resource_diversity` (30): strongest signal; low unique endpoint diversity pushes risk up.
+- `velocity` (30): higher requests per active minute push risk up.
+- `burstiness` (25): sudden minute-level spikes push risk up.
+- `fingerprint_reputation` (15): JA4 DB metadata only nudges the score; it does not override behavior.
+
+Default actions:
+
+- `70+`: add delay
+- `80+`: rate limit
+- `90+`: challenge
+- `95+`: block
+
+Important: a raw TLS ClientHello does not expose encrypted HTTP paths. In the current sniffer flow, Sybil can only see SNI at handshake time, so the diversity model falls back to host-level diversity when no real endpoint path is available. That fallback is intentionally weighted lower than true endpoint diversity.
 
 ### Example Test Commands
 
