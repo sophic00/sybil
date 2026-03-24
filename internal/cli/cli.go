@@ -31,6 +31,11 @@ import (
 	"github.com/sophic00/sybil/internal/tlshello"
 )
 
+const (
+	streamFlushInterval = time.Second
+	streamMaxAge        = 3 * streamFlushInterval
+)
+
 type tlsStreamFactory struct {
 	onHello       func(net, transport gopacket.Flow, hello *tlshello.Hello)
 	onClientHello func(net, transport gopacket.Flow, hello *tlshello.Hello, fields *parser.ClientHelloFields, ja4 *fingerprint.JA4)
@@ -213,7 +218,7 @@ func Run() error {
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(streamFlushInterval)
 	defer ticker.Stop()
 
 	go func() {
@@ -283,7 +288,7 @@ func Run() error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			assembler.FlushOlderThan(time.Now().Add(-3 * time.Second))
+			assembler.FlushOlderThan(time.Now().Add(-streamMaxAge))
 		default:
 			var packet gopacket.Packet
 			switch cfg.Backend {
