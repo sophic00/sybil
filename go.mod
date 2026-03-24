@@ -3,6 +3,7 @@ module github.com/sophic00/sybil
 go 1.25.5
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/cilium/ebpf v0.21.0
 	github.com/google/gopacket v1.1.19
 	github.com/redis/go-redis/v9 v9.17.0

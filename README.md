@@ -48,6 +48,7 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 ### Useful Flags
 
 ```text
+-config <path>          Optional TOML config file
 -iface <name>           Network interface (default: lo)
 -backend <pcap|ebpf>    Capture backend (default: pcap)
 -port <n>               Filter to TCP flows where src or dst port matches
@@ -58,6 +59,24 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 -redis-db <n>           Redis database number (default: 0)
 -risk-key-prefix <key>  Redis prefix for scoring state
 -ja4-lookup-url <url>   Optional JA4 enrichment URL or template
+```
+
+Configuration precedence is:
+
+1. built-in defaults
+2. TOML file values from `-config`
+3. explicit CLI flags
+
+Example `sybil.toml`:
+
+```toml
+backend = "pcap"
+iface = "wlan0"
+port = 443
+redis_addr = "127.0.0.1:6379"
+risk_key_prefix = "sybil:risk"
+ja4_lookup_timeout = "2s"
+risk_use_host_fallback = true
 ```
 
 ### Live Threat Scoring
