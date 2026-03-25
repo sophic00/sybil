@@ -14,6 +14,8 @@ Build the binary:
 make build
 ```
 
+Note: the project uses CGO-enabled dependencies (`libpcap` and `go-libsql`), so builds must keep `CGO_ENABLED=1`.
+
 Binary path:
 
 ```text
@@ -103,6 +105,15 @@ openssl s_client -connect 127.0.0.1:8443 -servername localhost
 
 When a ClientHello is detected, Sybil prints parsed fields such as protocol, TLS version, SNI, ALPN, cipher count, and extension count.
 
+### libSQL Fingerprint Lookup
+
+`internal/utils/getFingerprint.go` reads `DB_URL` and connects with `github.com/tursodatabase/go-libsql`.
+For a Docker-hosted libSQL server, set `DB_URL` to the server URL, for example:
+
+```bash
+export DB_URL="http://127.0.0.1:8080"
+```
+
 ## References
 
 - https://blog.cloudflare.com/ja4-signals/
@@ -122,11 +133,11 @@ When a ClientHello is detected, Sybil prints parsed fields such as protocol, TLS
  Go                       18         2977         2447          112          418
  Makefile                  1           26           18            0            8
 ─────────────────────────────────────────────────────────────────────────────────
- Markdown                  1          121            0           85           36
- |- BASH                   1           11           11            0            0
- (Total)                              132           11           85           36
+ Markdown                  1          133            0           91           42
+ |- BASH                   1           12           12            0            0
+ (Total)                              145           12           91           42
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Total                    23         3202         2521          207          474
+ Total                    23         3215         2522          213          480
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 <!-- tokei-end -->

@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/tursodatabase/go-libsql"
 )
 
 type SQLiteConfig struct {
@@ -17,12 +17,12 @@ type SQLiteConfig struct {
 func OpenSQLite(cfg SQLiteConfig) (*sql.DB, error) {
 	driver := strings.TrimSpace(cfg.Driver)
 	if driver == "" {
-		driver = "sqlite3"
+		driver = "libsql"
 	}
 
 	dsn := strings.TrimSpace(cfg.DSN)
 	if dsn == "" {
-		return nil, fmt.Errorf("missing sqlite dsn")
+		return nil, fmt.Errorf("missing libsql dsn")
 	}
 
 	conn, err := sql.Open(driver, dsn)
@@ -45,7 +45,7 @@ func OpenSQLiteFromEnv() (*sql.DB, error) {
 	}
 
 	return OpenSQLite(SQLiteConfig{
-		Driver: "sqlite3",
+		Driver: "libsql",
 		DSN:    dsn,
 	})
 }
