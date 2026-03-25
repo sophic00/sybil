@@ -28,6 +28,12 @@ func RegisterRoutes(mux *http.ServeMux, store Store) {
 	mux.Handle("/api/fingerprints/top-common", apiHandler(store, func(r *http.Request) (any, error) {
 		return store.TopCommonFingerprints(r.Context(), defaultTopLimit)
 	}))
+	mux.Handle("/api/fingerprints/frequent-last-hour", apiHandler(store, func(r *http.Request) (any, error) {
+		return store.FrequentFingerprintsLastHour(r.Context(), time.Now(), 2)
+	}))
+	mux.Handle("/api/fingerprints/top-last-hour", apiHandler(store, func(r *http.Request) (any, error) {
+		return store.TopFingerprintsLastHour(r.Context(), time.Now(), 10)
+	}))
 }
 
 type routeFunc func(r *http.Request) (any, error)

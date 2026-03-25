@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -252,6 +253,175 @@ func (s *RedisStore) TopCommonFingerprints(ctx context.Context, limit int) ([]Fi
 	}
 
 	return out, nil
+}
+
+func (s *RedisStore) FrequentFingerprintsLastHour(ctx context.Context, now time.Time, minCount int64) (FrequentFingerprintsSummary, error) {
+	if minCount <= 0 {
+		minCount = 2
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	stats, err := s.fingerprintStatsLastHour(ctx, now)
+	if err != nil {
+		return FrequentFingerprintsSummary{}, err
+	}
+
+	count := int64(0)
+	for _, entry := range stats {
+		if entry.Count >= minCount {
+			count++
+		}
+	}
+
+	return FrequentFingerprintsSummary{
+		WindowMinutes: 60,
+		MinCount:      minCount,
+		Count:         count,
+		EvaluatedAt:   now,
+	}, nil
+}
+
+func (s *RedisStore) TopFingerprintsLastHour(ctx context.Context, now time.Time, limit int) ([]FingerprintEntry, error) {
+	if limit <= 0 {
+		limit = defaultTopLimit
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+
+	stats, err := s.fingerprintStatsLastHour(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	if len(stats) == 0 {
+		return []FingerprintEntry{}, nil
+	}
+
+	entries := make([]FingerprintEntry, 0, len(stats))
+	for _, entry := range stats {
+		entries = append(entries, entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Count == entries[j].Count {
+			if entries[i].AvgThreatScore == entries[j].AvgThreatScore {
+				return entries[i].JA4Fingerprint < entries[j].JA4Fingerprint
+			}
+			return entries[i].AvgThreatScore > entries[j].AvgThreatScore
+		}
+		return entries[i].Count > entries[j].Count
+	})
+
+	if len(entries) > limit {
+		entries = entries[:limit]
+	}
+	return entries, nil
+}
+
+func (s *RedisStore) fingerprintStatsLastHour(ctx context.Context, now time.Time) (map[string]FingerprintEntry, error) {
+	cutoff := now.Add(-1 * time.Hour).Unix()
+	ids, err := s.client.ZRangeByScore(ctx, s.key("api", "requests", "top_threats_by_time"), &redis.ZRangeBy{
+		Min: strconv.FormatInt(cutoff, 10),
+		Max: "+inf",
+	}).Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return map[string]FingerprintEntry{}, nil
+	}
+
+	requests, err := s.loadRequestsByID(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	type aggregate struct {
+		count      int64
+		totalScore int64
+		display    string
+	}
+	agg := make(map[string]*aggregate)
+	for _, req := range requests {
+		fingerprint := strings.TrimSpace(req.JA4Fingerprint)
+		if fingerprint == "" {
+			fingerprint = strings.TrimSpace(req.JA3Hash)
+		}
+		if fingerprint == "" {
+			continue
+		}
+
+		item := agg[fingerprint]
+		if item == nil {
+			item = &aggregate{}
+			agg[fingerprint] = item
+		}
+
+		item.count++
+		item.totalScore += int64(req.ThreatScore)
+		if item.display == "" {
+			item.display = strings.TrimSpace(req.Fingerprint)
+		}
+	}
+
+	fields := make([]string, 0, len(agg))
+	for fingerprint := range agg {
+		fields = append(fields, fingerprint)
+	}
+	sort.Strings(fields)
+
+	pipe := s.client.Pipeline()
+	labelCmd := pipe.HMGet(ctx, s.key("api", "fingerprints", "labels"), fields...)
+	kindCmd := pipe.HMGet(ctx, s.key("api", "fingerprints", "kinds"), fields...)
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		return nil, err
+	}
+
+	labels := map[string]string{}
+	kinds := map[string]string{}
+	for idx, fingerprint := range fields {
+		labels[fingerprint] = strings.TrimSpace(stringValue(labelCmd.Val()[idx]))
+		kinds[fingerprint] = strings.TrimSpace(stringValue(kindCmd.Val()[idx]))
+	}
+
+	stats := make(map[string]FingerprintEntry, len(agg))
+	for fingerprint, item := range agg {
+		display := strings.TrimSpace(item.display)
+		if display == "" {
+			display = fingerprint
+		}
+		label := strings.TrimSpace(labels[fingerprint])
+		if label == "" {
+			label = "Unknown JA4 Client"
+		}
+		kind := strings.TrimSpace(kinds[fingerprint])
+		if kind == "" {
+			kind = "ja4"
+		}
+
+		avg := 0
+		if item.count > 0 {
+			avg = int(math.Round(float64(item.totalScore) / float64(item.count)))
+		}
+
+		stats[fingerprint] = FingerprintEntry{
+			JA3Hash:         fingerprint,
+			Fingerprint:     display,
+			Count:           item.count,
+			AvgThreatScore:  avg,
+			Label:           label,
+			FingerprintKind: kind,
+			JA4Fingerprint:  fingerprint,
+		}
+	}
+
+	return stats, nil
 }
 
 func (s *RedisStore) loadRequestsByID(ctx context.Context, ids []string) ([]TLSRequest, error) {

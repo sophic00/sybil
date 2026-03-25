@@ -45,6 +45,13 @@ type FingerprintEntry struct {
 	JA4Fingerprint  string `json:"ja4_fingerprint,omitempty"`
 }
 
+type FrequentFingerprintsSummary struct {
+	WindowMinutes int       `json:"window_minutes"`
+	MinCount      int64     `json:"min_count"`
+	Count         int64     `json:"count"`
+	EvaluatedAt   time.Time `json:"evaluated_at"`
+}
+
 type RequestObservation struct {
 	Timestamp        time.Time
 	SourceIP         string
@@ -65,4 +72,6 @@ type Store interface {
 	RecentRequests(ctx context.Context, limit int) ([]TLSRequest, error)
 	TopThreats(ctx context.Context, limit int, now time.Time) ([]TLSRequest, error)
 	TopCommonFingerprints(ctx context.Context, limit int) ([]FingerprintEntry, error)
+	FrequentFingerprintsLastHour(ctx context.Context, now time.Time, minCount int64) (FrequentFingerprintsSummary, error)
+	TopFingerprintsLastHour(ctx context.Context, now time.Time, limit int) ([]FingerprintEntry, error)
 }
