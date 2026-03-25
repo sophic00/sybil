@@ -58,6 +58,7 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 -redis-db <n>           Redis database number (default: 0)
 -risk-key-prefix <key>  Redis prefix for scoring state
 -ja4-lookup-url <url>   Optional JA4 enrichment URL or template
+-api-addr <addr>        Optional HTTP API listen address (example: :8080). API is disabled when empty.
 ```
 
 ### Live Threat Scoring
@@ -77,6 +78,16 @@ Default actions:
 - `95+`: block
 
 Important: a raw TLS ClientHello does not expose encrypted HTTP paths. In the current sniffer flow, Sybil can only see SNI at handshake time, so the diversity model falls back to host-level diversity when no real endpoint path is available. That fallback is intentionally weighted lower than true endpoint diversity.
+
+### HTTP API (experimental)
+
+Start the optional HTTP API with `-api-addr :8080`. Routes are wired but currently return `501 Not Implemented` because the binary does not yet persist captured TLS handshakes or scoring results:
+
+- `GET /api/requests/recent` – needs persisted recent handshakes with threat scores.
+- `GET /api/requests/top-threats` – needs stored threat assessments and matched signatures.
+- `GET /api/fingerprints/top-common` – needs JA3 fingerprint counts and average scores.
+- `GET /api/stats/timeseries` – needs hourly verdict counts.
+- `GET /api/stats/total` – needs total request counts by verdict.
 
 ### Example Test Commands
 

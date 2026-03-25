@@ -15,6 +15,7 @@ type Config struct {
 	Capture Capture
 	Output  Output
 	Risk    Risk
+	API     API
 }
 
 type Capture struct {
@@ -38,6 +39,10 @@ type Risk struct {
 	UseHostFallback  bool
 }
 
+type API struct {
+	ListenAddr string
+}
+
 func Parse() Config {
 	var cfg Config
 
@@ -55,6 +60,8 @@ func Parse() Config {
 	flag.StringVar(&cfg.Risk.JA4LookupURL, "ja4-lookup-url", "", "Optional JA4 lookup URL or template. Use %s to inject the URL-escaped JA4 fingerprint")
 	flag.DurationVar(&cfg.Risk.JA4LookupTimeout, "ja4-lookup-timeout", 2*time.Second, "Timeout for external JA4 enrichment lookups")
 	flag.BoolVar(&cfg.Risk.UseHostFallback, "risk-use-host-fallback", true, "Use SNI host as a weaker diversity signal when the real endpoint path is unavailable")
+
+	flag.StringVar(&cfg.API.ListenAddr, "api-addr", "", "Listen address for the HTTP API server (e.g. :8080). API is disabled when empty.")
 
 	flag.Parse()
 

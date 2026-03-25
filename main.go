@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sophic00/sybil/internal/api"
 	"github.com/sophic00/sybil/internal/capture"
 	"github.com/sophic00/sybil/internal/config"
 	"github.com/sophic00/sybil/internal/db"
@@ -69,6 +70,18 @@ func main() {
 		log.Fatal(err)
 	}
 	defer source.Close()
+
+	apiServer, err := api.Start(ctx, api.Config{ListenAddr: cfg.API.ListenAddr})
+	if err != nil {
+		log.Fatal(err)
+	}
+	if apiServer != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = apiServer.Shutdown(shutdownCtx)
+		}()
+	}
 
 	fmt.Printf("Capturing TCP on %s using %s backend... (Ctrl+C to stop)\n", cfg.Capture.Interface, cfg.Capture.Backend)
 	sig := make(chan os.Signal, 1)
