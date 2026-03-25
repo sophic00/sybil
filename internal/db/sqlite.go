@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -10,8 +11,9 @@ import (
 )
 
 type SQLiteConfig struct {
-	Driver string
-	DSN    string
+	Driver    string
+	DSN       string
+	AuthToken string
 }
 
 func OpenSQLite(cfg SQLiteConfig) (*sql.DB, error) {
@@ -23,6 +25,18 @@ func OpenSQLite(cfg SQLiteConfig) (*sql.DB, error) {
 	dsn := strings.TrimSpace(cfg.DSN)
 	if dsn == "" {
 		return nil, fmt.Errorf("missing libsql dsn")
+	}
+	if token := strings.TrimSpace(cfg.AuthToken); token != "" {
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("parse libsql dsn: %w", err)
+		}
+		query := parsed.Query()
+		if query.Get("authToken") == "" {
+			query.Set("authToken", token)
+		}
+		parsed.RawQuery = query.Encode()
+		dsn = parsed.String()
 	}
 
 	conn, err := sql.Open(driver, dsn)
@@ -45,7 +59,8 @@ func OpenSQLiteFromEnv() (*sql.DB, error) {
 	}
 
 	return OpenSQLite(SQLiteConfig{
-		Driver: "libsql",
-		DSN:    dsn,
+		Driver:    "libsql",
+		DSN:       dsn,
+		AuthToken: strings.TrimSpace(os.Getenv("AUTH_TOKEN")),
 	})
 }

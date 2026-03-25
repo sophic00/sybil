@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/sophic00/sybil/internal/parser"
 	"github.com/sophic00/sybil/internal/risk"
 	"github.com/sophic00/sybil/internal/stream"
+	"github.com/sophic00/sybil/internal/telemetry"
 	"github.com/sophic00/sybil/internal/tlshello"
 )
 
@@ -31,7 +33,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	threatScorer, closeThreatScorer, err := newThreatScorer(ctx, cfg.Risk)
+	registry := telemetry.NewRegistry(cfg.Capture.Backend, cfg.Capture.Interface)
+	closeHTTPServer, err := startHTTPServer(ctx, cfg.Observability, registry)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeHTTPServer()
+
+	threatScorer, closeThreatScorer, err := newThreatScorer(ctx, cfg.Risk, registry)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,9 +67,19 @@ func main() {
 				return
 			}
 
+			eventStart := time.Now()
+			registry.RecordEvent(event)
 			printHelloEvent(event)
-			assessClientHello(ctx, threatScorer, event)
+			assessmentStart := time.Now()
+			assessment, err := assessClientHello(ctx, threatScorer, event)
+			registry.ObserveDuration("assessment", time.Since(assessmentStart))
+			if err != nil {
+				log.Printf("risk assessment failed for %s: %v", event.JA4.Fingerprint, err)
+			} else if assessment != nil {
+				registry.RecordAssessment(*assessment)
+			}
 			onHello(event.Hello)
+			registry.ObserveDuration("event", time.Since(eventStart))
 		},
 	})
 
@@ -95,15 +114,17 @@ func main() {
 				if errors.Is(err, capture.ErrClosed) || errors.Is(err, context.Canceled) {
 					return
 				}
+				registry.RecordCaptureError(err)
 				log.Printf("capture read failed: %v", err)
 				continue
 			}
+			registry.RecordCapturePacket()
 			processor.ProcessPacket(packet)
 		}
 	}
 }
 
-func newThreatScorer(ctx context.Context, cfg config.Risk) (*risk.Scorer, func(), error) {
+func newThreatScorer(ctx context.Context, cfg config.Risk, registry *telemetry.Registry) (*risk.Scorer, func(), error) {
 	if cfg.RedisAddr == "" {
 		return nil, func() {}, nil
 	}
@@ -120,13 +141,41 @@ func newThreatScorer(ctx context.Context, cfg config.Risk) (*risk.Scorer, func()
 	riskCfg := risk.DefaultConfig()
 	riskCfg.UseHostFallback = cfg.UseHostFallback
 
-	store := risk.NewRedisStore(rdb, cfg.KeyPrefix)
-	var lookup risk.LookupClient
-	if cfg.JA4LookupURL != "" {
-		lookup = risk.NewHTTPLookupClient(cfg.JA4LookupURL, &http.Client{Timeout: cfg.JA4LookupTimeout})
+	var store risk.StatsStore = risk.NewRedisStore(rdb, cfg.KeyPrefix)
+	if registry != nil {
+		store = registry.WrapStatsStore(store)
 	}
 
-	return risk.NewScorer(store, lookup, riskCfg), func() { _ = rdb.Close() }, nil
+	var lookup risk.LookupClient
+	closeFns := []func(){func() { _ = rdb.Close() }}
+	switch {
+	case cfg.JA4DBURL != "":
+		dbLookup, closeDB, err := risk.NewLibSQLLookupClient(db.SQLiteConfig{
+			Driver:    "libsql",
+			DSN:       cfg.JA4DBURL,
+			AuthToken: cfg.JA4DBAuthToken,
+		})
+		if err != nil {
+			return nil, func() {}, err
+		}
+		closeFns = append(closeFns, closeDB)
+		lookup = dbLookup
+	case cfg.JA4LookupURL != "":
+		lookup = risk.NewHTTPLookupClient(cfg.JA4LookupURL, &http.Client{Timeout: cfg.JA4LookupTimeout})
+	}
+	if lookup != nil {
+		var observer risk.LookupObserver
+		if registry != nil {
+			observer = registry
+		}
+		lookup = risk.NewCachedLookupClient(lookup, rdb, cfg.KeyPrefix, cfg.JA4CacheTTL, observer)
+	}
+
+	return risk.NewScorer(store, lookup, riskCfg), func() {
+		for i := len(closeFns) - 1; i >= 0; i-- {
+			closeFns[i]()
+		}
+	}, nil
 }
 
 func printHelloEvent(event stream.Event) {
@@ -169,9 +218,9 @@ func printHelloEvent(event stream.Event) {
 	fmt.Printf("JA4: %s\n", ja4.Fingerprint)
 }
 
-func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event stream.Event) {
+func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event stream.Event) (*risk.Assessment, error) {
 	if threatScorer == nil || event.Fields == nil || event.JA4 == nil {
-		return
+		return nil, nil
 	}
 
 	assessment, err := threatScorer.Assess(ctx, risk.Observation{
@@ -181,8 +230,7 @@ func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event str
 		Timestamp: time.Now(),
 	})
 	if err != nil {
-		log.Printf("risk assessment failed for %s: %v", event.JA4.Fingerprint, err)
-		return
+		return nil, err
 	}
 
 	fmt.Printf("Threat Score: %d/100 action=%s", assessment.Score, assessment.Action)
@@ -196,4 +244,46 @@ func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event str
 	if assessment.LookupError != "" {
 		fmt.Printf("  lookup_error         %s\n", assessment.LookupError)
 	}
+	if assessment.Lookup != nil {
+		fmt.Printf("  identity_class       %s\n", assessment.Summary.IdentityClass)
+		fmt.Printf("  reputation_state     %s\n", assessment.Summary.ReputationState)
+		fmt.Printf("  app_family           %s\n", assessment.Summary.ApplicationFamily)
+		fmt.Printf("  os_family            %s\n", assessment.Summary.OSFamily)
+	}
+	return &assessment, nil
+}
+
+func startHTTPServer(ctx context.Context, cfg config.Observability, registry *telemetry.Registry) (func(), error) {
+	if strings.TrimSpace(cfg.HTTPAddr) == "" || registry == nil {
+		return func() {}, nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", registry.Handler())
+	mux.Handle("/healthz", registry.HealthHandler())
+
+	server := &http.Server{
+		Addr:    cfg.HTTPAddr,
+		Handler: mux,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("observability server failed: %v", err)
+		}
+	}()
+
+	fmt.Printf("Observability server listening on %s\n", cfg.HTTPAddr)
+	return func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}, nil
 }

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: Sybil Dashboards
+    orgId: 1
+    folder: Sybil
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

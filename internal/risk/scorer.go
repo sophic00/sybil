@@ -138,6 +138,7 @@ type Assessment struct {
 	Components  []ScoreComponent
 	Stats       LiveStats
 	Lookup      *FingerprintRecord
+	Summary     FingerprintSummary
 	LookupError string
 }
 
@@ -183,12 +184,13 @@ func (s *Scorer) Assess(ctx context.Context, obs Observation) (Assessment, error
 			record.JA4Fingerprint = obs.JA4
 		}
 	}
+	summary := SummarizeFingerprint(record, lookupErr, s.lookup != nil)
 
 	components := []ScoreComponent{
 		scoreResourceDiversity(stats, s.config),
 		scoreVelocity(stats, s.config),
 		scoreBurstiness(stats, s.config),
-		scoreReputation(record, lookupErr, s.lookup != nil, s.config),
+		scoreReputation(summary, record, lookupErr, s.lookup != nil, s.config),
 	}
 
 	total := 0
@@ -206,6 +208,7 @@ func (s *Scorer) Assess(ctx context.Context, obs Observation) (Assessment, error
 		Components: components,
 		Stats:      stats,
 		Lookup:     record,
+		Summary:    summary,
 	}
 	if lookupErr != nil {
 		assessment.LookupError = lookupErr.Error()
@@ -303,7 +306,7 @@ func scoreBurstiness(stats LiveStats, cfg Config) ScoreComponent {
 	return component
 }
 
-func scoreReputation(record *FingerprintRecord, lookupErr error, lookupEnabled bool, cfg Config) ScoreComponent {
+func scoreReputation(summary FingerprintSummary, record *FingerprintRecord, lookupErr error, lookupEnabled bool, cfg Config) ScoreComponent {
 	component := ScoreComponent{
 		Name:   "fingerprint_reputation",
 		Weight: cfg.WeightReputation,
@@ -321,40 +324,47 @@ func scoreReputation(record *FingerprintRecord, lookupErr error, lookupEnabled b
 		component.Detail = "reputation lookup not configured"
 		return component
 	case record == nil:
-		component.Detail = "reputation lookup returned no metadata"
+		component.Score = cfg.WeightReputation / 2
+		component.Detail = "fingerprint missing from reputation DB"
 		return component
 	}
 
-	confidence := 0.0
-	if record.Verified {
-		confidence += 0.45
+	scoreRatio := 0.35
+	switch summary.IdentityClass {
+	case "verified_browser":
+		scoreRatio = 0.0
+	case "browser":
+		scoreRatio = 0.12
+	case "verified_known":
+		scoreRatio = 0.10
+	case "mobile_app":
+		scoreRatio = 0.18
+	case "vpn":
+		scoreRatio = 0.40
+	case "automation":
+		scoreRatio = 0.55
+	case "malware_like":
+		scoreRatio = 0.90
+	case "known_unverified":
+		scoreRatio = 0.70
+	default:
+		scoreRatio = 0.50
 	}
-	if strings.TrimSpace(record.UserAgentString) != "" {
-		confidence += 0.20
-	}
-	if strings.TrimSpace(record.Application) != "" {
-		confidence += 0.10
-	}
-	if strings.TrimSpace(record.Library) != "" {
-		confidence += 0.08
-	}
-	if strings.TrimSpace(record.Device) != "" {
-		confidence += 0.05
-	}
-	if strings.TrimSpace(record.OS) != "" {
-		confidence += 0.05
-	}
-	if strings.TrimSpace(record.CertificateAuthority) != "" {
-		confidence += 0.04
-	}
-	if strings.TrimSpace(record.Notes) != "" {
-		confidence += 0.03
-	}
-	confidence = clampFloat(confidence, 0, 1)
 
-	component.Score = clampInt(int(math.Round(float64(cfg.WeightReputation)*(1-confidence))), 0, cfg.WeightReputation)
-	component.Detail = fmt.Sprintf("verified=%t ua_present=%t confidence=%.2f",
-		record.Verified, strings.TrimSpace(record.UserAgentString) != "", confidence)
+	if record.Verified && scoreRatio > 0.10 {
+		scoreRatio -= 0.10
+	}
+	if strings.TrimSpace(record.Library) != "" && scoreRatio > 0.05 {
+		scoreRatio -= 0.05
+	}
+	if strings.TrimSpace(record.Notes) != "" && summary.IdentityClass != "malware_like" {
+		scoreRatio += 0.05
+	}
+	scoreRatio = clampFloat(scoreRatio, 0, 1)
+
+	component.Score = clampInt(int(math.Round(float64(cfg.WeightReputation)*scoreRatio)), 0, cfg.WeightReputation)
+	component.Detail = fmt.Sprintf("identity=%s reputation=%s verified=%t",
+		summary.IdentityClass, summary.ReputationState, record.Verified)
 	return component
 }
 

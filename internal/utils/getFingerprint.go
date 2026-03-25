@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/sophic00/sybil/internal/db"
 )
@@ -30,21 +29,11 @@ type Fingerprint struct {
 }
 
 func GetFingerprint(input string) (string, error) {
-	authToken := os.Getenv("AUTH_TOKEN")
-
-	if authToken == "" {
-		return "", fmt.Errorf("missing authentication token in environment variables")
-	}
-
 	conn, err := db.OpenSQLiteFromEnv()
 	if err != nil {
 		return "", fmt.Errorf("failed to connect to database: %v", err)
 	}
 	defer conn.Close()
-
-	if authToken != "expected_token_value" {
-		return "", fmt.Errorf("invalid authentication token")
-	}
 
 	query := `SELECT application, library, device, os, user_agent_string, certificate_authority, verified, notes,
 		ja4_fingerprint, ja4_fingerprint_string, ja4s_fingerprint, ja4h_fingerprint, ja4x_fingerprint,

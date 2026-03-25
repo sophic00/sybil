@@ -60,6 +60,9 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 -redis-db <n>           Redis database number (default: 0)
 -risk-key-prefix <key>  Redis prefix for scoring state
 -ja4-lookup-url <url>   Optional JA4 enrichment URL or template
+-ja4-db-url <url>       Optional libSQL/Turso JA4 database URL
+-ja4-db-auth-token <t>  Optional auth token for the JA4 database
+-http-addr <addr>       HTTP listen address for /metrics and /healthz
 ```
 
 ### Live Threat Scoring
@@ -79,6 +82,59 @@ Default actions:
 - `95+`: block
 
 Important: a raw TLS ClientHello does not expose encrypted HTTP paths. In the current sniffer flow, Sybil can only see SNI at handshake time, so the diversity model falls back to host-level diversity when no real endpoint path is available. That fallback is intentionally weighted lower than true endpoint diversity.
+
+### JA4 Enrichment
+
+For demo mode, Sybil can enrich JA4 fingerprints from a read-only libSQL/Turso database.
+The binary reads `DB_URL` and `AUTH_TOKEN` from the environment by default, or you can pass `-ja4-db-url` and `-ja4-db-auth-token`.
+
+When enrichment is enabled, Sybil classifies traffic into demo-friendly categories such as `verified_browser`, `automation`, `vpn`, `mobile_app`, `known_unverified`, and `unknown`.
+These labels feed the Grafana dashboards and also influence the reputation component of the threat score.
+
+### Metrics And Grafana
+
+Sybil now serves:
+
+- `GET /metrics`
+- `GET /healthz`
+
+The default observability address is `:9090`.
+
+Bring up Redis, Prometheus, and Grafana:
+
+```bash
+docker compose up -d
+```
+
+Grafana:
+
+- URL: `http://127.0.0.1:3000`
+- Username: `admin`
+- Password: `admin`
+
+Prometheus scrapes the Sybil process from `host.docker.internal:9090`, so run the Sybil binary on the host.
+
+### Demo Flow
+
+Start Sybil with Redis and DB enrichment:
+
+```bash
+export DB_URL="https://thia.shrimp-fujita.ts.net"
+export AUTH_TOKEN="..."
+sudo ./bin/sybil -backend pcap -iface wlan0 -redis-addr 127.0.0.1:6379
+```
+
+Generate baseline traffic:
+
+```bash
+bash scripts/demo-benign.sh
+```
+
+Generate bursty suspicious traffic:
+
+```bash
+bash scripts/demo-suspicious.sh https://example.com 60 12
+```
 
 ### Example Test Commands
 
@@ -105,15 +161,6 @@ openssl s_client -connect 127.0.0.1:8443 -servername localhost
 
 When a ClientHello is detected, Sybil prints parsed fields such as protocol, TLS version, SNI, ALPN, cipher count, and extension count.
 
-### libSQL Fingerprint Lookup
-
-`internal/utils/getFingerprint.go` reads `DB_URL` and connects with `github.com/tursodatabase/go-libsql`.
-For a Docker-hosted libSQL server, set `DB_URL` to the server URL, for example:
-
-```bash
-export DB_URL="http://127.0.0.1:8080"
-```
-
 ## References
 
 - https://blog.cloudflare.com/ja4-signals/
@@ -130,14 +177,17 @@ export DB_URL="http://127.0.0.1:8080"
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  C                         1           41           27            5            9
  Dockerfile                1           26           18            5            3
- Go                       18         2977         2447          112          418
+ Go                       22         4080         3447          112          521
+ JSON                      3         1223         1223            0            0
  Makefile                  1           26           18            0            8
+ Shell                     2           31           25            2            4
+ YAML                      4           66           60            0            6
 ─────────────────────────────────────────────────────────────────────────────────
- Markdown                  1          133            0           91           42
- |- BASH                   1           12           12            0            0
- (Total)                              145           12           91           42
+ Markdown                  1          175            0          117           58
+ |- BASH                   1           17           17            0            0
+ (Total)                              192           17          117           58
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Total                    23         3215         2522          213          480
+ Total                    35         5685         4835          241          609
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 <!-- tokei-end -->
