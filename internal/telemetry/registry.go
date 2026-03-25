@@ -68,6 +68,7 @@ func NewRegistry(backend, iface string) *Registry {
 	r.registerCounter("sybil_tls_versions_total", "Observed ClientHello TLS versions")
 	r.registerCounter("sybil_tls_alpn_total", "Observed ALPN families")
 	r.registerCounter("sybil_tls_sni_total", "Observed SNI presence")
+	r.registerCounter("sybil_ja4_fingerprints_total", "Observed JA4 fingerprints from parsed ClientHello events")
 	r.registerCounter("sybil_lookup_requests_total", "JA4 enrichment lookup requests by source and result")
 	r.registerHistogram("sybil_lookup_duration_seconds", "JA4 enrichment lookup durations", []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5})
 	r.registerCounter("sybil_identity_events_total", "Enriched JA4 identity classes and families")
@@ -163,6 +164,12 @@ func (r *Registry) RecordEvent(event stream.Event) {
 
 	if event.Fields == nil {
 		return
+	}
+
+	if event.JA4 != nil && strings.TrimSpace(event.JA4.Fingerprint) != "" {
+		r.Inc("sybil_ja4_fingerprints_total", Labels{
+			"ja4": normalizeJA4FingerprintLabel(event.JA4.Fingerprint),
+		})
 	}
 
 	r.Inc("sybil_tls_versions_total", Labels{
@@ -486,6 +493,17 @@ func normalizeALPN(alpn string) string {
 	default:
 		return sanitizeLabelValue(alpn, "other")
 	}
+}
+
+func normalizeJA4FingerprintLabel(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return "unknown"
+	}
+	if len(value) > 128 {
+		value = value[:128]
+	}
+	return value
 }
 
 func scoreBand(score int) string {

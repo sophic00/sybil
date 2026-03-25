@@ -17,6 +17,8 @@ type fakeStore struct {
 	recent      []TLSRequest
 	topThreats  []TLSRequest
 	topCommon   []FingerprintEntry
+	frequent    FrequentFingerprintsSummary
+	topLastHour []FingerprintEntry
 	readErr     error
 	recordCalls int
 }
@@ -44,6 +46,14 @@ func (f *fakeStore) TopThreats(context.Context, int, time.Time) ([]TLSRequest, e
 
 func (f *fakeStore) TopCommonFingerprints(context.Context, int) ([]FingerprintEntry, error) {
 	return f.topCommon, f.readErr
+}
+
+func (f *fakeStore) FrequentFingerprintsLastHour(context.Context, time.Time, int64) (FrequentFingerprintsSummary, error) {
+	return f.frequent, f.readErr
+}
+
+func (f *fakeStore) TopFingerprintsLastHour(context.Context, time.Time, int) ([]FingerprintEntry, error) {
+	return f.topLastHour, f.readErr
 }
 
 func TestRegisterRoutesTotalStats(t *testing.T) {
@@ -82,6 +92,40 @@ func TestRegisterRoutesStoreUnavailable(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unexpected status: %d", rec.Code)
+	}
+}
+
+func TestRegisterRoutesLastHourEndpoints(t *testing.T) {
+	mux := http.NewServeMux()
+	now := time.Now().UTC()
+	RegisterRoutes(mux, &fakeStore{
+		frequent: FrequentFingerprintsSummary{
+			WindowMinutes: 60,
+			MinCount:      2,
+			Count:         3,
+			EvaluatedAt:   now,
+		},
+		topLastHour: []FingerprintEntry{{
+			JA4Fingerprint: "t13d1516h2_8daaf6152771_02713d6af862",
+			Count:          12,
+		}},
+	})
+
+	for _, tc := range []struct {
+		path string
+		code int
+	}{
+		{path: "/api/fingerprints/frequent-last-hour", code: http.StatusOK},
+		{path: "/api/fingerprints/top-last-hour", code: http.StatusOK},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tc.code {
+				t.Fatalf("unexpected status for %s: %d", tc.path, rec.Code)
+			}
+		})
 	}
 }
 
