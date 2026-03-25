@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sophic00/sybil/internal/api"
 	"github.com/sophic00/sybil/internal/capture"
 	"github.com/sophic00/sybil/internal/config"
 	"github.com/sophic00/sybil/internal/db"
@@ -34,7 +35,13 @@ func main() {
 	defer cancel()
 
 	registry := telemetry.NewRegistry(cfg.Capture.Backend, cfg.Capture.Interface)
-	closeHTTPServer, err := startHTTPServer(ctx, cfg.Observability, registry)
+	apiStore, closeAPIStore, err := newAPIStore(ctx, cfg.Risk)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer closeAPIStore()
+
+	closeHTTPServer, err := startHTTPServer(ctx, cfg.Observability, registry, apiStore)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -68,15 +75,23 @@ func main() {
 			}
 
 			eventStart := time.Now()
+			observedAt := eventStart.UTC()
 			registry.RecordEvent(event)
 			printHelloEvent(event)
 			assessmentStart := time.Now()
-			assessment, err := assessClientHello(ctx, threatScorer, event)
+			assessment, err := assessClientHello(ctx, threatScorer, event, observedAt)
 			registry.ObserveDuration("assessment", time.Since(assessmentStart))
 			if err != nil {
 				log.Printf("risk assessment failed for %s: %v", event.JA4.Fingerprint, err)
 			} else if assessment != nil {
 				registry.RecordAssessment(*assessment)
+				if apiStore != nil {
+					if observation, ok := api.BuildObservation(event, assessment, observedAt); ok {
+						if err := apiStore.Record(ctx, observation); err != nil {
+							log.Printf("api persistence failed for %s: %v", observation.JA4Fingerprint, err)
+						}
+					}
+				}
 			}
 			onHello(event.Hello)
 			registry.ObserveDuration("event", time.Since(eventStart))
@@ -122,6 +137,25 @@ func main() {
 			processor.ProcessPacket(packet)
 		}
 	}
+}
+
+func newAPIStore(ctx context.Context, cfg config.Risk) (api.Store, func(), error) {
+	if cfg.RedisAddr == "" {
+		return nil, func() {}, nil
+	}
+
+	rdb, err := db.OpenRedis(ctx, db.RedisConfig{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+	if err != nil {
+		return nil, func() {}, err
+	}
+
+	return api.NewRedisStore(rdb, cfg.KeyPrefix), func() {
+		_ = rdb.Close()
+	}, nil
 }
 
 func newThreatScorer(ctx context.Context, cfg config.Risk, registry *telemetry.Registry) (*risk.Scorer, func(), error) {
@@ -218,7 +252,7 @@ func printHelloEvent(event stream.Event) {
 	fmt.Printf("JA4: %s\n", ja4.Fingerprint)
 }
 
-func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event stream.Event) (*risk.Assessment, error) {
+func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event stream.Event, observedAt time.Time) (*risk.Assessment, error) {
 	if threatScorer == nil || event.Fields == nil || event.JA4 == nil {
 		return nil, nil
 	}
@@ -227,7 +261,7 @@ func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event str
 		JA4:       event.JA4.Fingerprint,
 		SourceIP:  event.NetFlow.Src().String(),
 		Hostname:  event.Fields.SNIHost,
-		Timestamp: time.Now(),
+		Timestamp: observedAt,
 	})
 	if err != nil {
 		return nil, err
@@ -253,7 +287,7 @@ func assessClientHello(ctx context.Context, threatScorer *risk.Scorer, event str
 	return &assessment, nil
 }
 
-func startHTTPServer(ctx context.Context, cfg config.Observability, registry *telemetry.Registry) (func(), error) {
+func startHTTPServer(ctx context.Context, cfg config.Observability, registry *telemetry.Registry, apiStore api.Store) (func(), error) {
 	if strings.TrimSpace(cfg.HTTPAddr) == "" || registry == nil {
 		return func() {}, nil
 	}
@@ -261,6 +295,7 @@ func startHTTPServer(ctx context.Context, cfg config.Observability, registry *te
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", registry.Handler())
 	mux.Handle("/healthz", registry.HealthHandler())
+	api.RegisterRoutes(mux, apiStore)
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,
