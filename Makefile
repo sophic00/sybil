@@ -1,4 +1,4 @@
-.PHONY: build test setup generate run run-pcap clean
+.PHONY: build test setup generate run run-pcap benchmark clean
 
 IFACE ?= wlan0
 
@@ -20,6 +20,9 @@ test:
 
 setup:
 	git config core.hooksPath .githooks
+
+benchmark: build
+	sudo IFACE=lo ./scripts/benchmark.sh
 
 clean:
 	rm -rf bin
