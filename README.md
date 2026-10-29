@@ -16,10 +16,12 @@ make build
 
 Note: the project uses CGO-enabled dependencies (`libpcap` and `go-libsql`), so builds must keep `CGO_ENABLED=1`.
 
-Binary path:
+Binary paths:
 
 ```text
-./bin/sybil
+./bin/sybil       live capture, scoring, metrics, API
+./bin/ja4check    offline pcap/dataset comparison
+./bin/ja4import   CSV to libSQL/SQLite importer
 ```
 
 ### Capture Backends
@@ -72,6 +74,11 @@ sudo ./bin/sybil -backend ebpf -iface wlan0
 -risk-challenge-threshold <n>   Override challenge threshold (default: 90; negative = scorer default)
 -risk-block-threshold <n>       Override block threshold (default: 95; negative = scorer default)
 -risk-use-host-fallback <bool>  Use SNI host as a weaker diversity signal (default: true)
+-ja4-csv <path>                JA4+ mapping CSV for enrichment (takes precedence)
+-risk-demo                     Fast demo scoring: 5s buckets, 2m window, lower thresholds
+-risk-bucket-seconds <n>        Scoring bucket width override (0 = preset/default)
+-risk-burst-min-buckets <n>     Minimum active buckets before burstiness (0 = preset/default)
+-risk-burst-min-requests <n>    Minimum requests before burstiness (0 = preset/default)
 -ja4-lookup-url <url>           Optional JA4 enrichment URL or template with %s
 -ja4-lookup-timeout <dur>       Timeout for external JA4 lookups (default: 2s)
 -ja4-db-url <url>               Optional libSQL/Turso JA4 database URL (prefer $DB_URL)
@@ -119,6 +126,68 @@ Prefer the environment variables on shared machines: CLI flags are visible to ev
 When enrichment is enabled, Sybil classifies traffic into demo-friendly categories such as `verified_browser`, `automation`, `vpn`, `mobile_app`, `known_unverified`, and `unknown`.
 These labels feed the Grafana dashboards and also influence the reputation component of the threat score.
 
+The bundled FoxIO mapping table can be used without a database:
+
+```bash
+sudo ./bin/sybil -backend pcap -iface wlan0 -redis-addr 127.0.0.1:6379 \
+  -ja4-csv datasets/ja4plus-mapping.csv
+```
+
+`-ja4-csv` takes precedence over `-ja4-db-url` and `-ja4-lookup-url`.
+
+### Dataset Comparison
+
+`bin/ja4check` compares computed JA4 fingerprints with `datasets/ja4plus-mapping.csv`.
+It reports `exact`, `ambiguous`, `prefix` (same `JA4_a` only), `unknown`, and
+parse errors. Exact matches are required by `-strict`.
+
+Compare explicit fingerprints:
+
+```bash
+./bin/ja4check -ja4 t13d1516h2_8daaf6152771_02713d6af862
+```
+
+Compare every ClientHello in an offline pcap/pcapng file:
+
+```bash
+./bin/ja4check -pcap capture.pcap -strict
+./bin/ja4check -pcap capture.pcap -port 443 -json
+```
+
+Or through Make:
+
+```bash
+make verify-ja4 PCAP=capture.pcap
+```
+
+Additional options:
+
+```text
+-db <dsn>             Read a libSQL/SQLite fingerprints table instead of CSV
+-db-auth-token <t>    Auth token for a remote libSQL database
+-lenient              Skip invalid JA4 rows in community CSV exports
+-max-matches <n>      Cap reported matches per fingerprint (default 20)
+```
+
+Sybil uses the libSQL driver, which reads local SQLite files and remote Turso
+databases. Import the committed CSV into a local database:
+
+```bash
+./bin/ja4import -dataset datasets/ja4plus-mapping.csv \
+  -db file:datasets/ja4.db -replace
+./bin/ja4check -db file:datasets/ja4.db -ja4 t13d1516h2_8daaf6152771_02713d6af862
+make ja4-db DB=file:datasets/ja4.db
+```
+
+The loader also accepts JA4DB-style headers (`ja4_fingerprint`, ...) and the
+frozen JA4DB export, which needs `-lenient`. Free pcap and mapping sources are
+listed in `datasets/README.md`; `scripts/fetch-ja4-samples.sh` downloads a
+small FoxIO pcap set.
+
+The CSV contains fingerprint labels, not packet payloads. Wire-level validation
+therefore requires a pcap; the CSV alone cannot prove that a ClientHello was
+parsed correctly.
+
 ### Metrics And Grafana
 
 Sybil now serves:
@@ -143,27 +212,154 @@ Grafana:
 
 Prometheus scrapes the Sybil process from `host.docker.internal:9090`, so run the Sybil binary on the host.
 
-### Demo Flow
+### Frontend Dashboard
 
-Start Sybil with Redis and DB enrichment:
+The Redis-backed dashboard is the `sybil_fe` submodule. It reads the API at
+`http://localhost:9090` by default and runs on port 3001 so it does not collide
+with Grafana.
 
 ```bash
-export DB_URL="https://<your-libsql-host>"
-export AUTH_TOKEN="<read-only-token>"
-sudo ./bin/sybil -backend pcap -iface wlan0 -redis-addr 127.0.0.1:6379
+git submodule update --init sybil_fe
+cd sybil_fe
+npm exec --yes pnpm@12.16.1 install
+npm exec --yes pnpm@12.16.1 dev
 ```
 
-Generate baseline traffic:
+Open `http://localhost:3001`. The API endpoints require Sybil to be started with
+`-redis-addr`; otherwise the frontend receives `503` responses.
+
+### Demo Flow
+
+Install the optional browser-profile client once (for multiple JA4s):
+
+```bash
+make demo-deps
+```
+
+One command starts Redis, the frontend and the pcap backend:
+
+```bash
+make demo
+```
+
+The backend runs in the foreground so its ClientHello output stays visible.
+Redis must be installed natively (`redis-server` and `redis-cli`); Docker is not
+required. On Arch:
+
+```bash
+sudo pacman -S redis
+```
+
+`make demo` uses a local libSQL database at `datasets/ja4.db`. On first run it
+imports `datasets/ja4plus-mapping.csv` plus `datasets/demo-profiles.csv` (named
+curl_cffi browser profiles) into that database; later runs use the same
+database. Refresh it explicitly with:
+
+```bash
+make ja4-db DB=file:datasets/ja4.db
+```
+
+Use a remote libSQL/Turso dataset instead:
+
+```bash
+DEMO_DB_URL=libsql://your-db.turso.io \
+DEMO_DB_TOKEN="$AUTH_TOKEN" \
+make demo
+```
+
+`make demo` auto-detects the default network interface and captures TCP port
+443. To run the backend manually instead:
+
+```bash
+sudo ./bin/sybil -backend pcap -iface wlan0 -port 443 \
+  -redis-addr 127.0.0.1:6379 \
+  -ja4-db-url file:datasets/ja4.db \
+  -risk-demo -risk-key-prefix sybil:demo
+```
+
+`-risk-demo` uses 5-second buckets, a 2-minute window and demo thresholds
+(`30/45/55/70`) so the dashboard reacts within seconds. Production defaults are
+unchanged; do not use demo thresholds for real triage.
+
+In a second terminal, generate a benign profile. It sends low-rate handshakes
+to several real public HTTPS hosts with several browser impersonation profiles:
 
 ```bash
 bash scripts/demo-benign.sh
 ```
 
-Generate bursty suspicious traffic:
+Generate the malicious/C2-shaped profile:
 
 ```bash
-bash scripts/demo-suspicious.sh https://example.com 60 12
+bash scripts/demo-suspicious.sh
 ```
+
+This runs a **lab C2 fixture** ClientHello with a 20-second quiet baseline at
+1 handshake/s, then 40 handshakes/s for 5 seconds (200 spike attempts). The
+fixture is labelled `C2 Lab Client (OpenSSL fixture)` with a `malware_like`
+reputation in the demo database, so the score reaches roughly 84 and the action
+is `block`. The label is synthetic and explicitly a lab fixture.
+
+The separate browser-behaviour profile is still available:
+
+```bash
+python3 scripts/demo_traffic.py --profile burst
+```
+
+`make demo` captures all TCP/443 traffic on the interface, so background browser
+or telemetry traffic can also appear. Use a loopback lab target or close other
+browsers for a clean run. Known background Chrome/Firefox/LinkupBot variants observed in
+this lab are mapped in `datasets/demo-profiles.csv`.
+
+Point it at a lab-owned HTTPS target instead:
+
+```bash
+bash scripts/demo-suspicious.sh --targets https://localhost:8443/
+```
+
+For a vulnerable demo app such as OWASP Juice Shop, put a TLS terminator
+(Caddy/nginx) in front of the app and use that HTTPS URL, then start the demo
+capture on the matching interface/port:
+
+```bash
+DEMO_IFACE=lo DEMO_PORT=8443 make demo
+bash scripts/demo-suspicious.sh --targets https://localhost:8443/
+```
+
+The `browse` profile uses these clients:
+
+```text
+chrome131, chrome136, firefox133, safari260, edge101,
+python, go, curl, openssl
+```
+
+Each client's JA4 is mapped in `datasets/demo-profiles.csv`, so the frontend
+shows `Chromium Browser`, `Firefox 133`, `Python 3.14 (OpenSSL)`,
+`Go 1.27 (crypto/tls)`, `curl 8.x (OpenSSL)`, etc. instead of
+`Unknown JA4 Client`.
+
+Select specific clients:
+
+```bash
+bash scripts/demo-benign.sh --clients chrome131,python,go,openssl
+python3 scripts/demo_traffic.py --profile moderate
+python3 scripts/demo_traffic.py --profile flood
+```
+
+`make demo-deps` also builds the tiny Go ClientHello helper used by the `go`
+client. Use `--engine ssl` if `curl_cffi` is unavailable; browser profiles then
+fall back to Python TLS, while explicit `python`, `go`, `curl`, and `openssl`
+clients still run their own stacks.
+
+Reset demo state between presentations:
+
+```bash
+bash scripts/demo_reset.sh sybil:demo
+```
+
+The frontend refreshes every second during `make demo`
+(`NEXT_PUBLIC_REFRESH_MS=1000`); the Grafana dashboards use a 2-second refresh
+when that stack is running separately.
 
 ### Example Test Commands
 

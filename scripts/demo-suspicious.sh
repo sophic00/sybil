@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
+# Real-HTTPS burst profile: one target, one browser fingerprint, capped rate.
+# Point it at a lab-owned HTTPS target with: --targets https://host:port/
 set -euo pipefail
-
-TARGET="${1:-https://example.com}"
-REQUESTS="${2:-40}"
-CONCURRENCY="${3:-8}"
-
-echo "burst target=${TARGET} requests=${REQUESTS} concurrency=${CONCURRENCY}"
-seq "${REQUESTS}" | xargs -n1 -P "${CONCURRENCY}" -I{} sh -c '
-  curl --http1.1 -fsS -o /dev/null "'"${TARGET}"'" || true
-'
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY=python3
+if [ -x "${ROOT}/.demo/venv/bin/python" ]; then
+  PY="${ROOT}/.demo/venv/bin/python"
+fi
+exec "${PY}" "${ROOT}/scripts/demo_traffic.py" --profile c2 "$@"

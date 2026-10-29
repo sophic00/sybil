@@ -362,3 +362,74 @@ func TestBenignHostTrafficStaysAllow(t *testing.T) {
 		t.Fatalf("expected benign host traffic to stay allow, got score=%d action=%s", assessment.Score, assessment.Action)
 	}
 }
+
+func TestDemoBurstReachesChallengeThreshold(t *testing.T) {
+	cfg := DemoConfig()
+	scorer := NewScorer(
+		stubStore{stats: LiveStats{
+			PairKey:           "ja4|1.2.3.4",
+			ResourceKind:      "host",
+			WindowRequests:    110,
+			TotalRequests:     110,
+			ActiveBuckets:     3,
+			BucketSeconds:     5,
+			RequestsPerMinute: 440,
+			UniqueResources:   1,
+			MinuteCounts:      []int64{5, 5, 100},
+			PeakMinuteCount:   100,
+			MedianMinuteCount: 5,
+			PeakToMedianRatio: 20,
+		}},
+		nil,
+		cfg,
+	)
+
+	assessment, err := scorer.Assess(context.Background(), Observation{
+		JA4:      "ja4",
+		SourceIP: "1.2.3.4",
+	})
+	if err != nil {
+		t.Fatalf("Assess returned error: %v", err)
+	}
+	if assessment.Score < cfg.ChallengeThreshold {
+		t.Fatalf("demo burst score = %d, want >= %d: %+v", assessment.Score, cfg.ChallengeThreshold, assessment.Components)
+	}
+}
+
+func TestDemoC2ReachesBlockThreshold(t *testing.T) {
+	cfg := DemoConfig()
+	scorer := NewScorer(
+		stubStore{stats: LiveStats{
+			PairKey:           "c2|1.2.3.4",
+			ResourceKind:      "host",
+			WindowRequests:    220,
+			TotalRequests:     220,
+			ActiveBuckets:     5,
+			BucketSeconds:     5,
+			RequestsPerMinute: 528,
+			UniqueResources:   1,
+			MinuteCounts:      []int64{5, 5, 5, 5, 200},
+			PeakMinuteCount:   200,
+			MedianMinuteCount: 5,
+			PeakToMedianRatio: 40,
+		}},
+		LookupFunc(func(context.Context, string) (*FingerprintRecord, error) {
+			return &FingerprintRecord{Notes: "c2 beacon lab fixture; malware_like"}, nil
+		}),
+		cfg,
+	)
+
+	assessment, err := scorer.Assess(context.Background(), Observation{
+		JA4:      "c2",
+		SourceIP: "1.2.3.4",
+	})
+	if err != nil {
+		t.Fatalf("Assess returned error: %v", err)
+	}
+	if assessment.Score < 80 {
+		t.Fatalf("demo C2 score = %d, want >= 80: %+v", assessment.Score, assessment.Components)
+	}
+	if assessment.Action != ActionBlock {
+		t.Fatalf("demo C2 action = %s, want %s", assessment.Action, ActionBlock)
+	}
+}

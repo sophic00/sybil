@@ -1,45 +1,18 @@
 #!/usr/bin/env python3
-"""High-risk traffic profile for Sybil demo.
-
-This wrapper runs the local target/load generator with an aggressive burst pattern.
-For clear malicious tagging in API cards, run Sybil with demo threshold overrides.
-"""
+"""Capped burst against a real HTTPS target."""
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
-from pathlib import Path
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-
 
 def main() -> int:
-    cmd = [
-        sys.executable,
-        str(SCRIPT_DIR / "demo_local_target_and_load.py"),
-        "--port",
-        "9443",
-        "--warmup-seconds",
-        "15",
-        "--warmup-rate",
-        "2",
-        "--warmup-concurrency",
-        "4",
-        "--mid-seconds",
-        "15",
-        "--mid-rate",
-        "2",
-        "--mid-concurrency",
-        "4",
-        "--spike-seconds",
-        "50",
-        "--spike-rate",
-        "160",
-        "--spike-concurrency",
-        "72",
-    ]
-    return subprocess.call(cmd)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    python = os.path.join(root, ".demo", "venv", "bin", "python")
+    if not os.access(python, os.X_OK):
+        python = sys.executable
+    return subprocess.call([python, os.path.join(root, "scripts", "demo_traffic.py"), "--profile", "c2"])
 
 
 if __name__ == "__main__":

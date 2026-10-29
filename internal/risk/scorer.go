@@ -39,6 +39,9 @@ type Config struct {
 	// HourWindow is the retention for the hourly rollup. HourCounts is
 	// currently informational only; scoring consumes the minute series.
 	HourWindow         time.Duration
+	BucketSeconds      int
+	BurstMinBuckets    int
+	BurstMinRequests   int64
 	UseHostFallback    bool
 	WeightEndpoint     int
 	WeightVelocity     int
@@ -57,6 +60,9 @@ func DefaultConfig() Config {
 		MinuteWindow:       time.Hour,
 		ResourceWindow:     time.Hour,
 		HourWindow:         24 * time.Hour,
+		BucketSeconds:      60,
+		BurstMinBuckets:    1,
+		BurstMinRequests:   10,
 		UseHostFallback:    true,
 		WeightEndpoint:     30,
 		WeightVelocity:     30,
@@ -69,6 +75,23 @@ func DefaultConfig() Config {
 		DelayBase:          200 * time.Millisecond,
 		DelayCeiling:       500 * time.Millisecond,
 	}
+}
+
+// DemoConfig returns the fast demo preset: short buckets, a short window and
+// lower action thresholds. It must not be used for production triage.
+func DemoConfig() Config {
+	cfg := DefaultConfig()
+	cfg.MinuteWindow = 2 * time.Minute
+	cfg.ResourceWindow = 10 * time.Minute
+	cfg.HourWindow = time.Hour
+	cfg.BucketSeconds = 5
+	cfg.BurstMinBuckets = 1
+	cfg.BurstMinRequests = 5
+	cfg.DelayThreshold = 30
+	cfg.RateLimitThreshold = 45
+	cfg.ChallengeThreshold = 55
+	cfg.BlockThreshold = 70
+	return cfg
 }
 
 type Observation struct {
@@ -107,7 +130,12 @@ type LiveStats struct {
 	ResourceKind   string
 	WindowRequests int64
 	TotalRequests  int64
-	ActiveMinutes  int
+	ActiveBuckets  int
+	BucketSeconds  int
+	// ActiveMinutes is retained for compatibility with the minute-oriented
+	// scorer helpers. In the fast demo path the buckets are shorter than a
+	// minute; use ActiveBuckets/BucketSeconds for display.
+	ActiveMinutes int
 	// RequestsPerMinute is requests / active minutes, i.e. intensity while the
 	// client was active. The store never zero-fills idle minutes, so a slow
 	// drip that is only active in a few minutes of the hour reads the same as
@@ -276,8 +304,8 @@ func scoreResourceDiversity(stats LiveStats, cfg Config) ScoreComponent {
 	risk := (0.7 * uniqueFactor) + (0.3 * coverageFactor)
 
 	component.Score = clampInt(int(math.Round(maxWeight*signalStrength*risk)), 0, cfg.WeightEndpoint)
-	component.Detail = fmt.Sprintf("%d unique %s values across %d requests in %d active minute(s) (visibility confidence %.2f)",
-		stats.UniqueResources, stats.ResourceKind, stats.WindowRequests, stats.ActiveMinutes, confidence)
+	component.Detail = fmt.Sprintf("%d unique %s values across %d requests in %d active %ds bucket(s) (visibility confidence %.2f)",
+		stats.UniqueResources, stats.ResourceKind, stats.WindowRequests, stats.ActiveBuckets, stats.BucketSeconds, confidence)
 	return component
 }
 
@@ -289,7 +317,7 @@ func scoreVelocity(stats LiveStats, cfg Config) ScoreComponent {
 	}
 
 	rpm := stats.RequestsPerMinute
-	component.Detail = fmt.Sprintf("%.1f requests/min across %d active minute(s)", rpm, stats.ActiveMinutes)
+	component.Detail = fmt.Sprintf("%.1f requests/min across %d active %ds bucket(s)", rpm, stats.ActiveBuckets, stats.BucketSeconds)
 
 	if rpm <= 10 {
 		return component
@@ -327,7 +355,15 @@ func scoreBurstiness(stats LiveStats, cfg Config) ScoreComponent {
 	}
 
 	buckets := len(stats.MinuteCounts)
-	if buckets == 0 || stats.WindowRequests < burstMinRequests {
+	minBuckets := cfg.BurstMinBuckets
+	if minBuckets <= 0 {
+		minBuckets = 1
+	}
+	minRequests := cfg.BurstMinRequests
+	if minRequests <= 0 {
+		minRequests = burstMinRequests
+	}
+	if buckets < minBuckets || stats.WindowRequests < minRequests {
 		return component
 	}
 

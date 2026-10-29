@@ -34,6 +34,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --no-create-home --user-group app
 COPY --from=builder /out/${BIN_NAME} ./${BIN_NAME}
+COPY --from=builder /src/datasets ./datasets
 # The container intentionally runs as non-root (USER app:app) and libpcap live
 # capture needs privileges, so start it with capabilities instead of root:
 #   docker run --cap-add=NET_RAW --cap-add=NET_ADMIN --network=host sybil ...

@@ -20,6 +20,7 @@ import (
 	"github.com/sophic00/sybil/internal/api"
 	"github.com/sophic00/sybil/internal/capture"
 	"github.com/sophic00/sybil/internal/config"
+	"github.com/sophic00/sybil/internal/dataset"
 	"github.com/sophic00/sybil/internal/db"
 	"github.com/sophic00/sybil/internal/parser"
 	"github.com/sophic00/sybil/internal/risk"
@@ -261,7 +262,19 @@ func newThreatScorer(rdb *redis.Client, cfg config.Risk, registry *telemetry.Reg
 	}
 
 	riskCfg := risk.DefaultConfig()
+	if cfg.DemoMode {
+		riskCfg = risk.DemoConfig()
+	}
 	riskCfg.UseHostFallback = cfg.UseHostFallback
+	if cfg.BucketSeconds > 0 {
+		riskCfg.BucketSeconds = cfg.BucketSeconds
+	}
+	if cfg.BurstMinBuckets > 0 {
+		riskCfg.BurstMinBuckets = cfg.BurstMinBuckets
+	}
+	if cfg.BurstMinRequests > 0 {
+		riskCfg.BurstMinRequests = cfg.BurstMinRequests
+	}
 	if cfg.DelayThreshold >= 0 {
 		riskCfg.DelayThreshold = cfg.DelayThreshold
 	}
@@ -280,27 +293,16 @@ func newThreatScorer(rdb *redis.Client, cfg config.Risk, registry *telemetry.Reg
 		store = registry.WrapStatsStore(store)
 	}
 
-	var lookup risk.LookupClient
-	closeFns := []func(){}
-	switch {
-	case cfg.JA4DBURL != "":
-		dbLookup, closeDB, err := risk.NewLibSQLLookupClient(db.SQLiteConfig{
-			Driver:    "libsql",
-			DSN:       cfg.JA4DBURL,
-			AuthToken: cfg.JA4DBAuthToken,
-		})
-		if err != nil {
-			// Behavioral scoring still works without enrichment, and the shared
-			// Redis client is owned by main (not this function), so a libSQL
-			// failure no longer leaks it or takes the sensor down.
-			log.Printf("ja4 libsql lookup unavailable: %v; continuing without enrichment", err)
-			return risk.NewScorer(store, nil, riskCfg), func() {}
-		}
-		closeFns = append(closeFns, closeDB)
-		lookup = dbLookup
-	case cfg.JA4LookupURL != "":
-		lookup = risk.NewHTTPLookupClient(cfg.JA4LookupURL, &http.Client{Timeout: cfg.JA4LookupTimeout})
+	lookup, closeLookup, err := newLookup(cfg)
+	if err != nil {
+		// Behavioral scoring still works without enrichment, and the shared
+		// Redis client is owned by main, so a lookup failure is degraded rather
+		// than fatal.
+		log.Printf("ja4 lookup unavailable: %v; continuing without enrichment", err)
+		lookup = nil
+		closeLookup = func() {}
 	}
+
 	if lookup != nil {
 		var observer risk.LookupObserver
 		if registry != nil {
@@ -309,10 +311,33 @@ func newThreatScorer(rdb *redis.Client, cfg config.Risk, registry *telemetry.Reg
 		lookup = risk.NewCachedLookupClient(lookup, rdb, cfg.KeyPrefix, cfg.JA4CacheTTL, observer)
 	}
 
-	return risk.NewScorer(store, lookup, riskCfg), func() {
-		for i := len(closeFns) - 1; i >= 0; i-- {
-			closeFns[i]()
+	return risk.NewScorer(store, lookup, riskCfg), closeLookup
+}
+
+// newLookup selects the configured enrichment source. The CSV path is
+// explicit and takes precedence over the database and HTTP options.
+func newLookup(cfg config.Risk) (risk.LookupClient, func(), error) {
+	switch {
+	case cfg.JA4CSVPath != "":
+		store, err := dataset.Load(cfg.JA4CSVPath)
+		if err != nil {
+			return nil, func() {}, err
 		}
+		return store, func() {}, nil
+	case cfg.JA4DBURL != "":
+		lookup, closeDB, err := risk.NewLibSQLLookupClient(db.SQLiteConfig{
+			Driver:    "libsql",
+			DSN:       cfg.JA4DBURL,
+			AuthToken: cfg.JA4DBAuthToken,
+		})
+		if err != nil {
+			return nil, func() {}, err
+		}
+		return lookup, closeDB, nil
+	case cfg.JA4LookupURL != "":
+		return risk.NewHTTPLookupClient(cfg.JA4LookupURL, &http.Client{Timeout: cfg.JA4LookupTimeout}), func() {}, nil
+	default:
+		return nil, func() {}, nil
 	}
 }
 

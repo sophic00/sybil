@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
+# Real-HTTPS browse profile: several public hosts and browser fingerprints.
 set -euo pipefail
-
-ROUNDS="${1:-2}"
-DELAY_SECONDS="${2:-2}"
-TARGETS=(
-  "https://www.google.com"
-  "https://www.cloudflare.com"
-  "https://www.github.com"
-  "https://www.wikipedia.org"
-)
-
-for round in $(seq 1 "${ROUNDS}"); do
-  echo "benign round ${round}/${ROUNDS}"
-  for target in "${TARGETS[@]}"; do
-    echo "  -> ${target}"
-    curl --http1.1 -fsS -o /dev/null "${target}" || true
-    sleep "${DELAY_SECONDS}"
-  done
-done
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY=python3
+if [ -x "${ROOT}/.demo/venv/bin/python" ]; then
+  PY="${ROOT}/.demo/venv/bin/python"
+fi
+exec "${PY}" "${ROOT}/scripts/demo_traffic.py" --profile browse "$@"
